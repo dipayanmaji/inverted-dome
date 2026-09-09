@@ -218,14 +218,22 @@ export default function InvertedDome({
 
     let cancelled = false;
     let lastAtlasKey = "";
+    // Aborts the in-flight fetches of a stale atlas build (a superseded
+    // `images` list, or this effect itself getting cleaned up — which
+    // React's StrictMode triggers once in dev on every mount). Without this,
+    // a "cancelled" build's fetches keep running in the background and
+    // compete with the new build's fetches for the same decoder resources,
+    // which was observed to occasionally corrupt one of many concurrent
+    // WebP decodes into a flat, banded frame — even though each build loads
+    // its own images strictly one at a time.
+    let atlasAbort = new AbortController();
+    let healTimer: number | undefined;
 
-    const syncAtlas = async () => {
-      const imgs = propsRef.current.images;
-      const key = imgs.join("|");
-      if (key === lastAtlasKey || imgs.length === 0) return;
-      lastAtlasKey = key;
-      const atlas = await buildAtlas(imgs);
-      if (cancelled) return;
+    const rebuildAtlas = async (imgs: string[]) => {
+      atlasAbort.abort();
+      atlasAbort = new AbortController();
+      const atlas = await buildAtlas(imgs, undefined, atlasAbort.signal);
+      if (cancelled || atlasAbort.signal.aborted) return;
       // No UNPACK_FLIP_Y_WEBGL here: the fragment shader computes atlas V to
       // increase downward (matching the canvas atlas's natural top-down row
       // order), so flipping the upload would mirror every image vertically.
@@ -236,6 +244,26 @@ export default function InvertedDome({
         loadedRef.current = true;
         onLoad?.();
       }
+    };
+
+    const syncAtlas = async () => {
+      const imgs = propsRef.current.images;
+      const key = imgs.join("|");
+      if (key === lastAtlasKey || imgs.length === 0) return;
+      lastAtlasKey = key;
+      await rebuildAtlas(imgs);
+
+      // Self-heal: decoding many WebP images has been observed to
+      // occasionally corrupt a single one into flat horizontal color bands
+      // — reproducibly with the source file confirmed valid on its own —
+      // even when every image is loaded strictly one at a time. A fully
+      // independent rebuild shortly after consistently comes back clean, so
+      // silently rebuild once more a couple seconds after the first load to
+      // self-correct any such transient corruption without user action.
+      clearTimeout(healTimer);
+      healTimer = window.setTimeout(() => {
+        if (!cancelled && propsRef.current.images.join("|") === key) rebuildAtlas(imgs);
+      }, 2500);
     };
     syncAtlas();
 
@@ -318,6 +346,8 @@ export default function InvertedDome({
 
     return () => {
       cancelled = true;
+      atlasAbort.abort();
+      clearTimeout(healTimer);
       cancelAnimationFrame(raf);
       ro.disconnect();
       gl.deleteTexture(texture);

@@ -113,7 +113,15 @@ void main() {
   vec2 atlasCellSize = vec2(1.0 / uAtlasCols, 1.0 / uAtlasRows);
   vec2 atlasUV = vec2(ax, ay) * atlasCellSize + uvInTile * atlasCellSize;
 
-  vec4 texColor = texture(uAtlas, atlasUV);
+  // textureLod(..., 0.0) instead of texture(...): the lens warp can make
+  // atlasUV change extremely sharply between two adjacent on-screen pixels
+  // near strong-curvature regions. GPUs compute implicit derivatives across
+  // each 2x2 pixel quad for automatic mip/LOD selection even when a texture
+  // has no mipmaps — an extreme derivative there was observed to corrupt the
+  // sampled result into flat color bands on some drivers, even though the
+  // stored texture data and the atlasUV math both check out as correct in
+  // isolation. Forcing LOD 0 explicitly skips that derivative computation.
+  vec4 texColor = textureLod(uAtlas, atlasUV, 0.0);
 
   float lum = dot(texColor.rgb, vec3(0.299, 0.587, 0.114));
   vec3 colorRGB = mix(texColor.rgb, vec3(lum), uGrayscale);

@@ -6,7 +6,7 @@ import "./App.css";
 
 export default function App() {
   const images = useImageManifest();
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [bodyHeight, setBodyHeight] = useState<number | null>(null);
 
@@ -31,7 +31,7 @@ export default function App() {
   const [gap, setGap] = useState(16);
   const [borderRadius, setBorderRadius] = useState(16);
   const [tileRotation, setTileRotation] = useState(0);
-  const [grayscale, setGrayscale] = useState(1);
+  const [grayscale, setGrayscale] = useState(0.5);
   const [vignette, setVignette] = useState(0.35);
 
   return (

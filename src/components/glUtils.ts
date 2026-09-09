@@ -41,6 +41,44 @@ export interface AtlasBudget {
   minCellSize?: number;
 }
 
+// Fetching the bytes ourselves and decoding via createImageBitmap() is a
+// different (and generally more reliable) code path than an <img>'s own
+// decode: an <img>'s onload — and even <img>.decode() — can occasionally
+// hand back an incompletely decoded frame that paints as flat horizontal
+// color bands once drawn to a canvas, even though the same file displays
+// perfectly fine as a plain <img>.
+async function loadFullyDecodedImage(src: string, signal?: AbortSignal): Promise<ImageBitmap | null> {
+  try {
+    const res = await fetch(src, { signal });
+    const blob = await res.blob();
+    return await createImageBitmap(blob);
+  } catch (err) {
+    if ((err as { name?: string })?.name !== "AbortError") {
+      console.warn(`InvertedDome: failed to decode image "${src}"`, err);
+    }
+    return null;
+  }
+}
+
+// Loads strictly one image at a time — even a modest concurrency cap (6 at
+// a time) was observed to occasionally starve/corrupt one of many
+// simultaneous WebP decodes under resource pressure, coming back as a flat,
+// horizontally-banded bitmap despite decoding perfectly fine on its own.
+// This only runs once per atlas rebuild, so the extra time is a worthwhile
+// trade for correctness. `signal` lets an in-progress build be abandoned
+// (e.g. React StrictMode's mount→cleanup→mount in dev, or the images list
+// changing again mid-build) — without it, a stale build's fetches would
+// keep running in the background and contend with the new one for the same
+// decoder resources, defeating the point of loading one at a time at all.
+async function loadAllSequentially<T, R>(items: T[], fn: (item: T, signal?: AbortSignal) => Promise<R>, signal?: AbortSignal): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  for (let i = 0; i < items.length; i++) {
+    if (signal?.aborted) break;
+    results[i] = await fn(items[i], signal);
+  }
+  return results;
+}
+
 /**
  * Loads each unique image URL and packs it into a square-ish atlas canvas.
  * The per-image cell size shrinks automatically as the image count grows, so
@@ -49,7 +87,8 @@ export interface AtlasBudget {
  */
 export async function buildAtlas(
   imageUrls: string[],
-  budget: AtlasBudget = {}
+  budget: AtlasBudget = {},
+  signal?: AbortSignal
 ): Promise<{ canvas: HTMLCanvasElement; cols: number; rows: number; count: number }> {
   const { maxAtlasDim = 4096, maxCellSize = 256, minCellSize = 48 } = budget;
 
@@ -68,18 +107,8 @@ export async function buildAtlas(
   ctx.fillStyle = "#808080";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  const loaded = await Promise.all(
-    unique.map(
-      (src) =>
-        new Promise<HTMLImageElement | null>((resolve) => {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.onload = () => resolve(img);
-          img.onerror = () => resolve(null);
-          img.src = src;
-        })
-    )
-  );
+  const loaded = await loadAllSequentially(unique, loadFullyDecodedImage, signal);
+  if (signal?.aborted) return { canvas, cols, rows, count };
 
   loaded.forEach((img, i) => {
     if (!img) return;
@@ -91,7 +120,17 @@ export async function buildAtlas(
     const h = img.height * scale;
     const dx = col * cellSize + (cellSize - w) / 2;
     const dy = row * cellSize + (cellSize - h) / 2;
+    // Cover-fit deliberately overshoots the cell on one axis (that's what
+    // lets it fully cover a square cell from a non-square source) — clip to
+    // the cell's own rectangle first, or that overshoot paints straight into
+    // the neighboring cell and bleeds two different photos into one tile.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(col * cellSize, row * cellSize, cellSize, cellSize);
+    ctx.clip();
     ctx.drawImage(img, dx, dy, w, h);
+    ctx.restore();
+    img.close();
   });
 
   return { canvas, cols, rows, count };
